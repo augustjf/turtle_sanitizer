@@ -1,59 +1,62 @@
 import rclpy
-import ros2_numpy as rnp
 import numpy as np
-import cv2 
 
-from tf2_ros.transform_listener import TransformListener
-#from tf2_ros import TransformException
-from geometry_msgs.msg import TransformStamped
-from tf2_ros.buffer import Buffer
-#from geographic_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
+from matplotlib import pyplot
+
+
 
 class TurtleSanitizer(Node):
     def __init__(self):
         super().__init__(node_name='turtle_sanitizer')
         self.map = OccupancyGrid
         self.create_subscription(OccupancyGrid, 'map', self.map_callback, 10)
-        self.map_publisher = self.create_publisher(Image, 'map_image', 10)
+        self.image_publisher = self.create_publisher(Image, 'map_image', 10)
         self.map_timer = self.create_timer(1, self.map_timer_callback)
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.timer = self.create_timer(1.0, self.timer_callback)
-        self.np_ma_map = np.ma.array(0) #Masked array of map
+        self.map_data = np.array(0)
         self.npmap = np.array(0)
         self.bridge = CvBridge()
         self.map_recieved = False
     
-    def thresh_and_fix_map(self):
-        data = np.asarray(self.map.data, dtype=np.int16).reshape(self.map.info.height, self.map.info.width)
-        data = 255-data*255/100 #Normalize image to 0-255
-        data[data > 255] = 127 #Value of unknown pixels in the occupancy grid
-        data = data.astype(np.uint8)
-        data[data < 120] = 0 #Lower threshold
-        data[data > 160] = 255 #Higher threshold
-        self.npmap = (np.array(data))
+    def translate_map_data(self):
+        data = np.asarray(self.map.data, dtype=np.int16)
+        data = 255-data*255/100 #Normalize image to 0-255     
+        data[data > 255] = -1 #Value of unknown pixels in the occupancy grid        
+        self.map_data = data
+
+    def save_map_histogram(self):
+        n_bins = 257
+        pyplot.hist(self.map_data, bins=n_bins)
+        pyplot.savefig('hist.png')
+    
+    def make_map_image(self):
+        data = self.map_data.reshape(self.map.info.height, self.map.info.width)
+        self.npmap = data
+    
+    def thresh_map_data(self):
+        data = self.map_data
+        data[data < 0] = 127
+        data[data < 120] = 0
+        data[data > 140] = 255
+        data = np.array(data, dtype=np.uint8)
+        self.map_data = data
 
     def map_callback(self, msg):
         self.map = msg
-        self.np_ma_map = rnp.numpify(msg)
         self.map_recieved = True
+        self.get_logger().info('Map recieved')
     
     def map_timer_callback(self):
-        self.thresh_and_fix_map()
         if self.map_recieved:
-            self.map_publisher.publish(self.bridge.cv2_to_imgmsg(np.array(self.npmap)))
-    
-    def timer_callback(self):
-        from_frame = 'map'
-        to_frame = 'base_link'
-        # try:
-        #     t = self.tf_buffer.lookup_transform(to_frame, from_frame, rclpy.time.Time())
-        # except TransformException as ex:
-        #     self.get_logger().info(f'Could not transform {to_frame} to {from_frame}: {ex}')
+            self.translate_map_data()
+            self.thresh_map_data()
+            self.make_map_image()
+            #self.save_map_histogram()
+            self.image_publisher.publish(self.bridge.cv2_to_imgmsg(np.array(self.npmap)))
+            self.get_logger().info('Publishing')
     
 def main():
     rclpy.init()
